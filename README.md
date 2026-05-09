@@ -49,17 +49,36 @@ SnowLumaNative/.github/workflows/build-native.yml
 
 ## 所需 Secrets
 
-所有 GitHub PAT 统一命名为 **`SNOWLUMA_TOKEN`**，需要在以下三个仓库各自配置同名 secret（值可以是同一个 PAT，也可以是分别签发的 fine-grained PAT，只要权限覆盖到对应用途即可）：
+PR 创建者要显示成 bot，必须用 **GitHub App installation token**（PAT 不行）。所以仓库现在分两路 secret：
 
-| 仓库 | 用途 | 该仓库下 `SNOWLUMA_TOKEN` 需要的权限 |
-| --- | --- | --- |
-| `SnowLuma/nnphook` | 调用 API 在 SnowLumaNative 上触发 `repository_dispatch`；`release-docker.yml` 跨仓 checkout SnowLuma + Docker 框架 | 对 `SnowLumaNative`：`contents:write`；对 `SnowLuma/SnowLuma` 和 Docker 框架仓库：`contents:read` |
-| `SnowLuma/SnowLumaNative` | checkout 私有 nnphook 源码；在 SnowLuma 上推分支 + 开 PR | 对 `nnphook`：`contents:read`；对 `SnowLuma/SnowLuma`：`contents:write` + `pull-requests:write` |
-| `SnowLuma/SnowLuma`（如另有需要）| 由其他流水线引用 | 按需 |
+| 仓库 | Secret | 类型 | 用途 |
+| --- | --- | --- | --- |
+| `SnowLuma/nnphook` | `SNOWLUMA_TOKEN` | PAT | (a) 调用 API 在 SnowLumaNative 上触发 `repository_dispatch`；(b) `release-docker.yml` 跨仓 checkout SnowLuma + Docker 框架 |
+| `SnowLuma/SnowLumaNative` | `SNOWLUMA_TOKEN` | PAT | `build-native-{linux,windows}` 跨仓 checkout 私有 nnphook 源码（只读） |
+| `SnowLuma/SnowLumaNative` | `SNOWLUMA_BOT_APP_ID` | App | GitHub App「Snowluma Bot」的 App ID |
+| `SnowLuma/SnowLumaNative` | `SNOWLUMA_BOT_PRIVATE_KEY` | App | 同 App 的 PEM 私钥（包含 `-----BEGIN ... PRIVATE KEY-----` 头尾） |
 
-> 最简方案：签发一枚 classic PAT（`repo` scope，覆盖三个仓库），分别复制到三个仓库的 `SNOWLUMA_TOKEN` secret 即可。
-> `GITHUB_TOKEN` 已在 `release` job 通过 `permissions: contents: write` 授权创建 Release，无需额外 secret。
-> Docker Hub 凭据 `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` 与本流水线无关，仅 `release-docker.yml` 使用，保持不变。
+### GitHub App 设置一次性步骤
+
+1. 在 SnowLuma 组织设置里 **New GitHub App**：
+   - **Name**：`Snowluma Bot`（PR 创建者将显示为 `snowluma-bot[bot]`，slug 即 App 名小写连字符）
+   - **Homepage URL**：随便填一个
+   - **Webhook**：取消勾选 Active
+   - **Repository permissions**：
+     - Contents: Read and write
+     - Pull requests: Read and write
+     - Metadata: Read-only（默认）
+   - **Where can this GitHub App be installed?**：Only on this account
+2. 创建完成后页面上：
+   - 记下 **App ID**（数字）→ 填到 `SNOWLUMA_BOT_APP_ID`
+   - 滚到底部 → **Generate a private key** → 下载 `.pem` → 整个文件内容（包括头尾）填到 `SNOWLUMA_BOT_PRIVATE_KEY`
+3. 左侧 **Install App** → 选 SnowLuma 组织 → 至少勾选 `SnowLuma/SnowLuma`（PR 目标仓库），可顺手勾选 `SnowLumaNative`。
+
+### 备注
+
+- 最简 PAT 方案：classic PAT（`repo` scope，覆盖 nnphook + SnowLuma + SnowLumaNative）即可同时填进两个仓库的 `SNOWLUMA_TOKEN`。
+- `GITHUB_TOKEN` 已在 `release` job 通过 `permissions: contents: write` 授权创建 Release，无需额外 secret。
+- Docker Hub 凭据 `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` 与本流水线无关，仅 `release-docker.yml` 使用，保持不变。
 
 ## 手动跑一次（不通过 nnphook）
 

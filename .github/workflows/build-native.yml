@@ -19,13 +19,25 @@ name: Build SnowLuma Native
 #      `packages/runtime/native/snowluma-{linux-x64,linux-arm64,win32-x64}.{node,so,dll}`
 #      (six files) with the freshly built artifacts.
 #
-# Required secret (configure under repository or environment scope):
-#   - SNOWLUMA_TOKEN : single PAT with access to all three SnowLuma repos.
-#                      * SnowLuma/nnphook        : contents:read   (checkout)
-#                      * SnowLuma/SnowLuma       : contents:write + pull-requests:write
-#                                                  (push branch + open PR; only
-#                                                   needed when open_pr=true)
-#                      A classic PAT with `repo` scope works just as well.
+# Required secrets (configure under repository or environment scope):
+#   - SNOWLUMA_TOKEN              : PAT with `contents:read` on SnowLuma/nnphook,
+#                                   used by build-native-linux / build-native-windows
+#                                   to checkout the (private) source.
+#   - SNOWLUMA_BOT_APP_ID         : numeric App ID of the "Snowluma Bot"
+#                                   GitHub App.
+#   - SNOWLUMA_BOT_PRIVATE_KEY    : PEM-encoded private key of the same App.
+#                                   Together these mint a short-lived
+#                                   installation token used by `open-snowluma-pr`
+#                                   so the resulting PR shows up as
+#                                   `<app-slug>[bot] opened …` and commits are
+#                                   authored by the bot.
+#
+# The GitHub App must be installed on:
+#   * SnowLuma/SnowLuma           - Contents: Read+Write, Pull requests: Read+Write
+#                                   (push branch + open PR; only needed when
+#                                    open_pr=true)
+#   * SnowLuma/SnowLumaNative     - Metadata: Read (recommended; lets
+#                                   create-github-app-token run inside this repo).
 #
 # `GITHUB_TOKEN` is enough to publish the Release on this repository (see
 # the `permissions:` block on the `release` job).
@@ -77,6 +89,8 @@ jobs:
       release_tag: ${{ steps.values.outputs.release_tag }}
       open_pr: ${{ steps.values.outputs.open_pr }}
       snowluma_repository: ${{ steps.values.outputs.snowluma_repository }}
+      snowluma_repository_owner: ${{ steps.values.outputs.snowluma_repository_owner }}
+      snowluma_repository_name: ${{ steps.values.outputs.snowluma_repository_name }}
       snowluma_base_branch: ${{ steps.values.outputs.snowluma_base_branch }}
       trigger_run_url: ${{ steps.values.outputs.trigger_run_url }}
     steps:
@@ -126,6 +140,19 @@ jobs:
             echo "${value}=${!value}" >> "${GITHUB_OUTPUT}"
           done
           echo "trigger_run_url=${trigger_run_url}" >> "${GITHUB_OUTPUT}"
+
+          # Split snowluma_repository ("owner/name") into its components so the
+          # PR job can scope the GitHub App installation token correctly.
+          if [[ "${snowluma_repository}" != */* ]]; then
+            echo "snowluma_repository must be in 'owner/name' form, got: ${snowluma_repository}" >&2
+            exit 1
+          fi
+          snowluma_repository_owner="${snowluma_repository%%/*}"
+          snowluma_repository_name="${snowluma_repository##*/}"
+          {
+            echo "snowluma_repository_owner=${snowluma_repository_owner}"
+            echo "snowluma_repository_name=${snowluma_repository_name}"
+          } >> "${GITHUB_OUTPUT}"
 
           {
             echo "## Resolved build inputs"
@@ -387,21 +414,51 @@ jobs:
     if: needs.resolve.outputs.open_pr == 'true'
     runs-on: ubuntu-22.04
     steps:
-      - name: Validate SNOWLUMA_TOKEN
+      - name: Validate GitHub App credentials
         env:
-          SNOWLUMA_TOKEN: ${{ secrets.SNOWLUMA_TOKEN }}
+          APP_ID: ${{ secrets.SNOWLUMA_BOT_APP_ID }}
+          PRIVATE_KEY: ${{ secrets.SNOWLUMA_BOT_PRIVATE_KEY }}
         run: |
-          if [ -z "${SNOWLUMA_TOKEN}" ]; then
-            echo "Missing secret SNOWLUMA_TOKEN (PAT for SnowLuma push + PR)" >&2
+          if [ -z "${APP_ID}" ] || [ -z "${PRIVATE_KEY}" ]; then
+            echo "Missing secret SNOWLUMA_BOT_APP_ID and/or SNOWLUMA_BOT_PRIVATE_KEY" >&2
+            echo "Create a GitHub App and install it on the target SnowLuma repo." >&2
             exit 1
           fi
+
+      - name: Mint GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.SNOWLUMA_BOT_APP_ID }}
+          private-key: ${{ secrets.SNOWLUMA_BOT_PRIVATE_KEY }}
+          owner: ${{ needs.resolve.outputs.snowluma_repository_owner }}
+          repositories: ${{ needs.resolve.outputs.snowluma_repository_name }}
+
+      - name: Resolve bot identity
+        id: bot
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          bot_login="${APP_SLUG}[bot]"
+          bot_id="$(gh api "/users/${bot_login}" --jq .id)"
+          bot_email="${bot_id}+${bot_login}@users.noreply.github.com"
+          bot_identity="${bot_login} <${bot_email}>"
+          {
+            echo "login=${bot_login}"
+            echo "id=${bot_id}"
+            echo "email=${bot_email}"
+            echo "identity=${bot_identity}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "Resolved bot: ${bot_identity}"
 
       - name: Checkout SnowLuma
         uses: actions/checkout@v6
         with:
           repository: ${{ needs.resolve.outputs.snowluma_repository }}
           ref: ${{ needs.resolve.outputs.snowluma_base_branch }}
-          token: ${{ secrets.SNOWLUMA_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           path: SnowLuma
 
       - name: Download native outputs
@@ -430,12 +487,12 @@ jobs:
         uses: peter-evans/create-pull-request@v7
         with:
           path: SnowLuma
-          token: ${{ secrets.SNOWLUMA_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           base: ${{ needs.resolve.outputs.snowluma_base_branch }}
           branch: native/auto-update-${{ needs.resolve.outputs.release_tag }}
           delete-branch: true
-          committer: SnowLuma Native Bot <snowluma-native-bot@users.noreply.github.com>
-          author: SnowLuma Native Bot <snowluma-native-bot@users.noreply.github.com>
+          committer: ${{ steps.bot.outputs.identity }}
+          author: ${{ steps.bot.outputs.identity }}
           add-paths: |
             packages/runtime/native/snowluma-linux-x64.node
             packages/runtime/native/snowluma-linux-x64.so
