@@ -326,13 +326,13 @@ jobs:
             packages/runtime/native/snowluma-linux-arm64.node
             packages/runtime/native/snowluma-linux-arm64.so
           commit-message: |
-            chore(native): refresh Linux native artifacts (${{ needs.resolve.outputs.release_tag }})
+            chore(native): replace native artifacts (${{ needs.resolve.outputs.release_tag }})
 
             Source: ${{ needs.resolve.outputs.nnphook_repository }}@${{ needs.resolve.outputs.nnphook_ref }}
             Build:  ${{ needs.release.outputs.release_url }}
-          title: "chore(native): refresh Linux native artifacts (${{ needs.resolve.outputs.release_tag }})"
+          title: "chore(native): replace native artifacts (${{ needs.resolve.outputs.release_tag }})"
           body: |
-            Automated update of Linux native artifacts under
+            Automated replacement of native artifacts under
             `packages/runtime/native/`.
 
             | File | |
