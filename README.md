@@ -6,7 +6,7 @@
 
 ```
 nnphook (本地仓库)
-   │  workflow_dispatch / push tag native-v* / commit msg [build-native]
+   │  workflow_dispatch / push tag v* / commit msg [build-native]
    ▼
 nnphook/.github/workflows/dispatch-native-build.yml
    │  repository_dispatch  event_type = nnphook-native-build
@@ -31,7 +31,7 @@ SnowLumaNative/.github/workflows/build-native.yml
 ## 触发方式（在 nnphook 仓库一侧）
 
 1. **手动**：Actions → `Dispatch SnowLuma Native Build` → `Run workflow`，可填 ref / release_tag / open_pr。
-2. **打 tag**：`git tag native-vX.Y.Z && git push origin native-vX.Y.Z`，自动以 tag 名作为 release_tag。
+2. **打 tag**：`git tag vX.Y.Z && git push origin vX.Y.Z`，自动以 tag 名作为 release_tag。
 3. **提交信息标记**：向 `main` 推送的 commit message 中包含 `[build-native]` 或 `[release-native]` 即触发，release_tag 自动取 `native-<short_sha>`。
 
 ## 所需 Secrets
