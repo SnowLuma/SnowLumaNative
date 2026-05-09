@@ -1,6 +1,15 @@
 # SnowLumaNative
 
-构建并缓存 SnowLuma 的 Linux 原生产物（`snowluma-linux-{x64,arm64}.{node,so}`），由 [`SnowLuma/nnphook`](https://github.com/SnowLuma/nnphook) 触发，构建完成后将产物发布到本仓库 Release，并向 [`SnowLuma/SnowLuma`](https://github.com/SnowLuma/SnowLuma) 自动提交 PR 替换 `packages/runtime/native/` 下的对应文件。
+构建并缓存 SnowLuma 的原生产物（Linux x64/arm64 + Windows x64，共 6 个文件），由 [`SnowLuma/nnphook`](https://github.com/SnowLuma/nnphook) 触发，构建完成后将产物发布到本仓库 Release，并向 [`SnowLuma/SnowLuma`](https://github.com/SnowLuma/SnowLuma) 自动提交 PR 替换 `packages/runtime/native/` 下的对应文件。
+
+## 产物映射
+
+| 产物文件 | 构建源 |
+| --- | --- |
+| `snowluma-linux-{x64,arm64}.node` | nnphook 根 CMake 项目，`snowluma_linux_addon` target（Ninja Release） |
+| `snowluma-linux-{x64,arm64}.so` | nnphook 根 CMake 项目，`snowluma_linux_hook` target（Ninja Release） |
+| `snowluma-win32-x64.dll` | nnphook 根 CMake 项目，`qq_hook_dll` target（VS17 Release）→ 输出 `qq_hook.dll` 后改名 |
+| `snowluma-win32-x64.node` | `examples/injector_addon` cmake-js 项目（VS17 Release）→ 输出 `injector_addon.node` 后改名 |
 
 ## 流水线
 
@@ -12,20 +21,24 @@ nnphook/.github/workflows/dispatch-native-build.yml
    │  repository_dispatch  event_type = nnphook-native-build
    ▼
 SnowLumaNative/.github/workflows/build-native.yml
-   ├─ checkout SnowLuma/nnphook @ ref            (SNOWLUMA_TOKEN)
-   ├─ cmake -G Ninja Release  →  matrix x64 + arm64
-   ├─ verify stripped: 无 .debug/.symtab/.strtab
-   ├─ publish Release on SnowLumaNative          (GITHUB_TOKEN)
-   │     - snowluma-linux-x64.{node,so}
-   │     - snowluma-linux-arm64.{node,so}
-   │     - SHA256SUMS.txt
-   └─ open PR on SnowLuma/SnowLuma               (SNOWLUMA_TOKEN)
+   ├─ build-native-linux  (matrix: ubuntu-22.04 / ubuntu-22.04-arm)
+   │     cmake -G Ninja Release → snowluma-linux-{x64,arm64}.{node,so}
+   │     verify stripped: 无 .debug/.symtab/.strtab
+   ├─ build-native-windows (windows-2022, x64)
+   │     cmake -G "Visual Studio 17 2022" --target qq_hook_dll → qq_hook.dll
+   │     cmake-js rebuild (examples/injector_addon)            → injector_addon.node
+   │     rename → snowluma-win32-x64.{dll,node}
+   │     verify: no sibling .pdb
+   ├─ release  (publishes 6 binaries + SHA256SUMS.txt)         (GITHUB_TOKEN)
+   └─ open-snowluma-pr (if open_pr=true)                       (SNOWLUMA_TOKEN)
          分支: native/auto-update-<release_tag>
          替换:
            packages/runtime/native/snowluma-linux-x64.node
            packages/runtime/native/snowluma-linux-x64.so
            packages/runtime/native/snowluma-linux-arm64.node
            packages/runtime/native/snowluma-linux-arm64.so
+           packages/runtime/native/snowluma-win32-x64.node
+           packages/runtime/native/snowluma-win32-x64.dll
 ```
 
 ## 触发方式（在 nnphook 仓库一侧）

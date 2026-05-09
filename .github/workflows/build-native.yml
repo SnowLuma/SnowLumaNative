@@ -5,12 +5,19 @@ name: Build SnowLuma Native
 # Flow:
 #   1. nnphook fires `repository_dispatch` (event_type = nnphook-native-build).
 #   2. This workflow checks out the nnphook source at the requested ref.
-#   3. Linux x64 + arm64 native artifacts are built with the same toolchain
-#      that the docker pipeline uses.
+#   3. Native artifacts are built in parallel on three runners:
+#        - ubuntu-22.04        → snowluma-linux-x64.{node,so}
+#        - ubuntu-22.04-arm    → snowluma-linux-arm64.{node,so}
+#        - windows-2022        → snowluma-win32-x64.{node,dll}
+#      Linux outputs come from the root CMake project (Ninja Release).
+#      Windows outputs come from two pieces:
+#        - `qq_hook_dll` target in the root CMake project → qq_hook.dll
+#        - `examples/injector_addon` cmake-js project    → injector_addon.node
+#      Both are renamed to the canonical `snowluma-win32-x64.{dll,node}`.
 #   4. Results are published as a Release on this repository (SnowLumaNative).
 #   5. Optionally, a Pull Request is opened against SnowLuma/SnowLuma replacing
-#      `packages/runtime/native/snowluma-linux-{arch}.{node,so}` (four files)
-#      with the freshly built artifacts.
+#      `packages/runtime/native/snowluma-{linux-x64,linux-arm64,win32-x64}.{node,so,dll}`
+#      (six files) with the freshly built artifacts.
 #
 # Required secret (configure under repository or environment scope):
 #   - SNOWLUMA_TOKEN : single PAT with access to all three SnowLuma repos.
@@ -136,7 +143,7 @@ jobs:
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
 
-  build-native:
+  build-native-linux:
     needs: resolve
     strategy:
       fail-fast: false
@@ -200,10 +207,108 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  build-native-windows:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            cmake_arch: x64
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout nnphook source
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ needs.resolve.outputs.nnphook_repository }}
+          ref: ${{ needs.resolve.outputs.nnphook_ref }}
+          path: native
+          token: ${{ secrets.SNOWLUMA_TOKEN || github.token }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Build qq_hook.dll (root CMake target qq_hook_dll)
+        working-directory: native
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-windows -G "Visual Studio 17 2022" -A ${{ matrix.cmake_arch }}
+          cmake --build build-windows --config Release --target qq_hook_dll --parallel
+          test -f "build-windows/Release/qq_hook.dll"
+
+      - name: Build injector_addon.node (cmake-js, examples/injector_addon)
+        working-directory: native/examples/injector_addon
+        run: |
+          set -euo pipefail
+          npm ci --no-fund --no-audit
+          npx --no-install cmake-js rebuild
+
+      - name: Stage Windows artifacts with canonical names
+        working-directory: native
+        run: |
+          set -euo pipefail
+
+          # cmake-js may emit into build/Release/ (Visual Studio generator)
+          # or build/ (single-config generator). Locate the addon binary:
+          node_path=""
+          for candidate in \
+              examples/injector_addon/build/Release/injector_addon.node \
+              examples/injector_addon/build/injector_addon.node; do
+            if [ -f "${candidate}" ]; then
+              node_path="${candidate}"
+              break
+            fi
+          done
+          if [ -z "${node_path}" ]; then
+            echo "injector_addon.node not found under examples/injector_addon/build" >&2
+            ls -laR examples/injector_addon/build || true
+            exit 1
+          fi
+
+          mkdir -p "out/win32-${{ matrix.arch }}"
+          cp "build-windows/Release/qq_hook.dll" \
+             "out/win32-${{ matrix.arch }}/snowluma-win32-${{ matrix.arch }}.dll"
+          cp "${node_path}" \
+             "out/win32-${{ matrix.arch }}/snowluma-win32-${{ matrix.arch }}.node"
+          ls -lah "out/win32-${{ matrix.arch }}"
+
+      - name: Verify Windows native outputs have no PDB / debug directory
+        working-directory: native
+        run: |
+          set -euo pipefail
+          # CMake configs (root + injector_addon) already pass /DEBUG:NONE in
+          # Release, so neither a sibling .pdb nor an IMAGE_DEBUG_DIRECTORY
+          # entry should exist. Sanity-check both.
+          for f in "out/win32-${{ matrix.arch }}/snowluma-win32-${{ matrix.arch }}.dll" \
+                   "out/win32-${{ matrix.arch }}/snowluma-win32-${{ matrix.arch }}.node"; do
+            test -f "${f}"
+            pdb="${f%.*}.pdb"
+            if [ -f "${pdb}" ]; then
+              echo "Unexpected sibling PDB found: ${pdb}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Upload native outputs
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-win32-${{ matrix.arch }}
+          path: |
+            native/out/win32-${{ matrix.arch }}/snowluma-win32-${{ matrix.arch }}.dll
+            native/out/win32-${{ matrix.arch }}/snowluma-win32-${{ matrix.arch }}.node
+          if-no-files-found: error
+          retention-days: 7
+
   release:
     needs:
       - resolve
-      - build-native
+      - build-native-linux
+      - build-native-windows
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -213,7 +318,7 @@ jobs:
       - name: Download native outputs
         uses: actions/download-artifact@v7
         with:
-          pattern: native-linux-*
+          pattern: native-*
           path: release-assets
           merge-multiple: true
 
@@ -224,7 +329,9 @@ jobs:
           for f in release-assets/snowluma-linux-x64.node \
                    release-assets/snowluma-linux-x64.so \
                    release-assets/snowluma-linux-arm64.node \
-                   release-assets/snowluma-linux-arm64.so; do
+                   release-assets/snowluma-linux-arm64.so \
+                   release-assets/snowluma-win32-x64.node \
+                   release-assets/snowluma-win32-x64.dll; do
             test -f "${f}" || { echo "Missing ${f}" >&2; exit 1; }
           done
 
@@ -237,6 +344,8 @@ jobs:
             snowluma-linux-x64.so \
             snowluma-linux-arm64.node \
             snowluma-linux-arm64.so \
+            snowluma-win32-x64.node \
+            snowluma-win32-x64.dll \
             | tee SHA256SUMS.txt
 
       - name: Publish GitHub Release
@@ -256,19 +365,24 @@ jobs:
             - `snowluma-linux-x64.so`
             - `snowluma-linux-arm64.node`
             - `snowluma-linux-arm64.so`
+            - `snowluma-win32-x64.node`
+            - `snowluma-win32-x64.dll`
             - `SHA256SUMS.txt`
           files: |
             release-assets/snowluma-linux-x64.node
             release-assets/snowluma-linux-x64.so
             release-assets/snowluma-linux-arm64.node
             release-assets/snowluma-linux-arm64.so
+            release-assets/snowluma-win32-x64.node
+            release-assets/snowluma-win32-x64.dll
             release-assets/SHA256SUMS.txt
           fail_on_unmatched_files: true
 
   open-snowluma-pr:
     needs:
       - resolve
-      - build-native
+      - build-native-linux
+      - build-native-windows
       - release
     if: needs.resolve.outputs.open_pr == 'true'
     runs-on: ubuntu-22.04
@@ -293,7 +407,7 @@ jobs:
       - name: Download native outputs
         uses: actions/download-artifact@v7
         with:
-          pattern: native-linux-*
+          pattern: native-*
           path: native-artifacts
           merge-multiple: true
 
@@ -302,10 +416,12 @@ jobs:
           set -euo pipefail
           dest="SnowLuma/packages/runtime/native"
           mkdir -p "${dest}"
-          install -m 644 native-artifacts/snowluma-linux-x64.node "${dest}/snowluma-linux-x64.node"
-          install -m 644 native-artifacts/snowluma-linux-x64.so "${dest}/snowluma-linux-x64.so"
+          install -m 644 native-artifacts/snowluma-linux-x64.node   "${dest}/snowluma-linux-x64.node"
+          install -m 644 native-artifacts/snowluma-linux-x64.so     "${dest}/snowluma-linux-x64.so"
           install -m 644 native-artifacts/snowluma-linux-arm64.node "${dest}/snowluma-linux-arm64.node"
-          install -m 644 native-artifacts/snowluma-linux-arm64.so "${dest}/snowluma-linux-arm64.so"
+          install -m 644 native-artifacts/snowluma-linux-arm64.so   "${dest}/snowluma-linux-arm64.so"
+          install -m 644 native-artifacts/snowluma-win32-x64.node   "${dest}/snowluma-win32-x64.node"
+          install -m 644 native-artifacts/snowluma-win32-x64.dll    "${dest}/snowluma-win32-x64.dll"
 
           echo "## Files staged for PR" >> "${GITHUB_STEP_SUMMARY}"
           (cd SnowLuma && git status --short packages/runtime/native) | tee -a "${GITHUB_STEP_SUMMARY}"
@@ -325,6 +441,8 @@ jobs:
             packages/runtime/native/snowluma-linux-x64.so
             packages/runtime/native/snowluma-linux-arm64.node
             packages/runtime/native/snowluma-linux-arm64.so
+            packages/runtime/native/snowluma-win32-x64.node
+            packages/runtime/native/snowluma-win32-x64.dll
           commit-message: |
             chore(native): replace native artifacts (${{ needs.resolve.outputs.release_tag }})
 
@@ -341,6 +459,8 @@ jobs:
             | `packages/runtime/native/snowluma-linux-x64.so`     | replaced |
             | `packages/runtime/native/snowluma-linux-arm64.node` | replaced |
             | `packages/runtime/native/snowluma-linux-arm64.so`   | replaced |
+            | `packages/runtime/native/snowluma-win32-x64.node`   | replaced |
+            | `packages/runtime/native/snowluma-win32-x64.dll`    | replaced |
 
             - Source: `${{ needs.resolve.outputs.nnphook_repository }}@${{ needs.resolve.outputs.nnphook_ref }}`
             - Release: ${{ needs.release.outputs.release_url }}
