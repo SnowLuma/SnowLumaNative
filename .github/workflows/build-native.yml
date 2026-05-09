@@ -318,6 +318,8 @@ jobs:
           base: ${{ needs.resolve.outputs.snowluma_base_branch }}
           branch: native/auto-update-${{ needs.resolve.outputs.release_tag }}
           delete-branch: true
+          committer: SnowLuma Native Bot <snowluma-native-bot@users.noreply.github.com>
+          author: SnowLuma Native Bot <snowluma-native-bot@users.noreply.github.com>
           add-paths: |
             packages/runtime/native/snowluma-linux-x64.node
             packages/runtime/native/snowluma-linux-x64.so
