@@ -1,0 +1,348 @@
+name: Build SnowLuma Native
+
+# Cross-repo build orchestrator triggered by SnowLuma/nnphook.
+#
+# Flow:
+#   1. nnphook fires `repository_dispatch` (event_type = nnphook-native-build).
+#   2. This workflow checks out the nnphook source at the requested ref.
+#   3. Linux x64 + arm64 native artifacts are built with the same toolchain
+#      that the docker pipeline uses.
+#   4. Results are published as a Release on this repository (SnowLumaNative).
+#   5. Optionally, a Pull Request is opened against SnowLuma/SnowLuma replacing
+#      `packages/runtime/native/snowluma-linux-{arch}.{node,so}` (four files)
+#      with the freshly built artifacts.
+#
+# Required secret (configure under repository or environment scope):
+#   - SNOWLUMA_TOKEN : single PAT with access to all three SnowLuma repos.
+#                      * SnowLuma/nnphook        : contents:read   (checkout)
+#                      * SnowLuma/SnowLuma       : contents:write + pull-requests:write
+#                                                  (push branch + open PR; only
+#                                                   needed when open_pr=true)
+#                      A classic PAT with `repo` scope works just as well.
+#
+# `GITHUB_TOKEN` is enough to publish the Release on this repository (see
+# the `permissions:` block on the `release` job).
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  repository_dispatch:
+    types:
+      - nnphook-native-build
+  workflow_dispatch:
+    inputs:
+      nnphook_repository:
+        description: nnphook source repository
+        required: true
+        default: SnowLuma/nnphook
+      nnphook_ref:
+        description: nnphook git ref (tag, branch, or SHA)
+        required: true
+        default: main
+      release_tag:
+        description: Release tag created on SnowLumaNative
+        required: true
+        default: native-latest
+      open_pr:
+        description: Open a SnowLuma PR replacing the native artifacts
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      snowluma_repository:
+        description: SnowLuma framework repository (PR target)
+        required: true
+        default: SnowLuma/SnowLuma
+      snowluma_base_branch:
+        description: Base branch for the SnowLuma PR
+        required: true
+        default: main
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      nnphook_repository: ${{ steps.values.outputs.nnphook_repository }}
+      nnphook_ref: ${{ steps.values.outputs.nnphook_ref }}
+      release_tag: ${{ steps.values.outputs.release_tag }}
+      open_pr: ${{ steps.values.outputs.open_pr }}
+      snowluma_repository: ${{ steps.values.outputs.snowluma_repository }}
+      snowluma_base_branch: ${{ steps.values.outputs.snowluma_base_branch }}
+      trigger_run_url: ${{ steps.values.outputs.trigger_run_url }}
+    steps:
+      - name: Resolve inputs
+        id: values
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_NNPHOOK_REPOSITORY: ${{ github.event.client_payload.nnphook_repository }}
+          DISPATCH_NNPHOOK_REF: ${{ github.event.client_payload.nnphook_ref }}
+          DISPATCH_RELEASE_TAG: ${{ github.event.client_payload.release_tag }}
+          DISPATCH_OPEN_PR: ${{ github.event.client_payload.open_pr }}
+          DISPATCH_SNOWLUMA_REPOSITORY: ${{ github.event.client_payload.snowluma_repository }}
+          DISPATCH_SNOWLUMA_BRANCH: ${{ github.event.client_payload.snowluma_base_branch }}
+          DISPATCH_TRIGGER_RUN_URL: ${{ github.event.client_payload.trigger_run_url }}
+          INPUT_NNPHOOK_REPOSITORY: ${{ inputs.nnphook_repository }}
+          INPUT_NNPHOOK_REF: ${{ inputs.nnphook_ref }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_OPEN_PR: ${{ inputs.open_pr }}
+          INPUT_SNOWLUMA_REPOSITORY: ${{ inputs.snowluma_repository }}
+          INPUT_SNOWLUMA_BRANCH: ${{ inputs.snowluma_base_branch }}
+        run: |
+          set -euo pipefail
+
+          if [ "${EVENT_NAME}" = "repository_dispatch" ]; then
+            nnphook_repository="${DISPATCH_NNPHOOK_REPOSITORY:-SnowLuma/nnphook}"
+            nnphook_ref="${DISPATCH_NNPHOOK_REF:-main}"
+            release_tag="${DISPATCH_RELEASE_TAG:-native-latest}"
+            open_pr="${DISPATCH_OPEN_PR:-true}"
+            snowluma_repository="${DISPATCH_SNOWLUMA_REPOSITORY:-SnowLuma/SnowLuma}"
+            snowluma_base_branch="${DISPATCH_SNOWLUMA_BRANCH:-main}"
+            trigger_run_url="${DISPATCH_TRIGGER_RUN_URL:-}"
+          else
+            nnphook_repository="${INPUT_NNPHOOK_REPOSITORY}"
+            nnphook_ref="${INPUT_NNPHOOK_REF}"
+            release_tag="${INPUT_RELEASE_TAG}"
+            open_pr="${INPUT_OPEN_PR}"
+            snowluma_repository="${INPUT_SNOWLUMA_REPOSITORY}"
+            snowluma_base_branch="${INPUT_SNOWLUMA_BRANCH}"
+            trigger_run_url=""
+          fi
+
+          for value in nnphook_repository nnphook_ref release_tag open_pr snowluma_repository snowluma_base_branch; do
+            if [ -z "${!value}" ]; then
+              echo "Missing required value: ${value}" >&2
+              exit 1
+            fi
+            echo "${value}=${!value}" >> "${GITHUB_OUTPUT}"
+          done
+          echo "trigger_run_url=${trigger_run_url}" >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Resolved build inputs"
+            echo
+            echo "| Key | Value |"
+            echo "| --- | --- |"
+            echo "| nnphook_repository | \`${nnphook_repository}\` |"
+            echo "| nnphook_ref | \`${nnphook_ref}\` |"
+            echo "| release_tag | \`${release_tag}\` |"
+            echo "| open_pr | \`${open_pr}\` |"
+            echo "| snowluma_repository | \`${snowluma_repository}\` |"
+            echo "| snowluma_base_branch | \`${snowluma_base_branch}\` |"
+            if [ -n "${trigger_run_url}" ]; then
+              echo "| trigger_run_url | ${trigger_run_url} |"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  build-native:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: ubuntu-22.04
+          - arch: arm64
+            os: ubuntu-22.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout nnphook source
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ needs.resolve.outputs.nnphook_repository }}
+          ref: ${{ needs.resolve.outputs.nnphook_ref }}
+          path: native
+          token: ${{ secrets.SNOWLUMA_TOKEN || github.token }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build g++
+
+      - name: Build Linux native outputs
+        working-directory: native
+        run: |
+          set -euo pipefail
+          node_include_dir="$(node -p "require('path').join(require('path').dirname(process.execPath), '..', 'include', 'node')")"
+          cmake -S . -B build-linux -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DNODE_API_INCLUDE_DIR="${node_include_dir}"
+          cmake --build build-linux
+          test -f "build-linux/snowluma-linux-${{ matrix.arch }}.node"
+          test -f "build-linux/snowluma-linux-${{ matrix.arch }}.so"
+
+      - name: Verify stripped Linux native outputs
+        working-directory: native
+        run: |
+          set -euo pipefail
+          for file in "build-linux/snowluma-linux-${{ matrix.arch }}.node" "build-linux/snowluma-linux-${{ matrix.arch }}.so"; do
+            file "${file}"
+            if readelf -S "${file}" | grep -qE '\.(debug|symtab|strtab)'; then
+              echo "Unexpected symbols or debug sections in ${file}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Upload native outputs
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-linux-${{ matrix.arch }}
+          path: |
+            native/build-linux/snowluma-linux-${{ matrix.arch }}.node
+            native/build-linux/snowluma-linux-${{ matrix.arch }}.so
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs:
+      - resolve
+      - build-native
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    outputs:
+      release_url: ${{ steps.publish.outputs.url }}
+    steps:
+      - name: Download native outputs
+        uses: actions/download-artifact@v7
+        with:
+          pattern: native-linux-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Show downloaded assets
+        run: |
+          set -euo pipefail
+          ls -lah release-assets
+          for f in release-assets/snowluma-linux-x64.node \
+                   release-assets/snowluma-linux-x64.so \
+                   release-assets/snowluma-linux-arm64.node \
+                   release-assets/snowluma-linux-arm64.so; do
+            test -f "${f}" || { echo "Missing ${f}" >&2; exit 1; }
+          done
+
+      - name: Compute SHA-256 manifest
+        working-directory: release-assets
+        run: |
+          set -euo pipefail
+          sha256sum \
+            snowluma-linux-x64.node \
+            snowluma-linux-x64.so \
+            snowluma-linux-arm64.node \
+            snowluma-linux-arm64.so \
+            | tee SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        id: publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve.outputs.release_tag }}
+          name: ${{ needs.resolve.outputs.release_tag }}
+          body: |
+            Automated SnowLuma native build.
+
+            - Source: `${{ needs.resolve.outputs.nnphook_repository }}@${{ needs.resolve.outputs.nnphook_ref }}`
+            - Trigger run: ${{ needs.resolve.outputs.trigger_run_url }}
+
+            Files:
+            - `snowluma-linux-x64.node`
+            - `snowluma-linux-x64.so`
+            - `snowluma-linux-arm64.node`
+            - `snowluma-linux-arm64.so`
+            - `SHA256SUMS.txt`
+          files: |
+            release-assets/snowluma-linux-x64.node
+            release-assets/snowluma-linux-x64.so
+            release-assets/snowluma-linux-arm64.node
+            release-assets/snowluma-linux-arm64.so
+            release-assets/SHA256SUMS.txt
+          fail_on_unmatched_files: true
+
+  open-snowluma-pr:
+    needs:
+      - resolve
+      - build-native
+      - release
+    if: needs.resolve.outputs.open_pr == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Validate SNOWLUMA_TOKEN
+        env:
+          SNOWLUMA_TOKEN: ${{ secrets.SNOWLUMA_TOKEN }}
+        run: |
+          if [ -z "${SNOWLUMA_TOKEN}" ]; then
+            echo "Missing secret SNOWLUMA_TOKEN (PAT for SnowLuma push + PR)" >&2
+            exit 1
+          fi
+
+      - name: Checkout SnowLuma
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ needs.resolve.outputs.snowluma_repository }}
+          ref: ${{ needs.resolve.outputs.snowluma_base_branch }}
+          token: ${{ secrets.SNOWLUMA_TOKEN }}
+          path: SnowLuma
+
+      - name: Download native outputs
+        uses: actions/download-artifact@v7
+        with:
+          pattern: native-linux-*
+          path: native-artifacts
+          merge-multiple: true
+
+      - name: Replace native artifacts in SnowLuma
+        run: |
+          set -euo pipefail
+          dest="SnowLuma/packages/runtime/native"
+          mkdir -p "${dest}"
+          install -m 644 native-artifacts/snowluma-linux-x64.node "${dest}/snowluma-linux-x64.node"
+          install -m 644 native-artifacts/snowluma-linux-x64.so "${dest}/snowluma-linux-x64.so"
+          install -m 644 native-artifacts/snowluma-linux-arm64.node "${dest}/snowluma-linux-arm64.node"
+          install -m 644 native-artifacts/snowluma-linux-arm64.so "${dest}/snowluma-linux-arm64.so"
+
+          echo "## Files staged for PR" >> "${GITHUB_STEP_SUMMARY}"
+          (cd SnowLuma && git status --short packages/runtime/native) | tee -a "${GITHUB_STEP_SUMMARY}"
+
+      - name: Create or update Pull Request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          path: SnowLuma
+          token: ${{ secrets.SNOWLUMA_TOKEN }}
+          base: ${{ needs.resolve.outputs.snowluma_base_branch }}
+          branch: native/auto-update-${{ needs.resolve.outputs.release_tag }}
+          delete-branch: true
+          add-paths: |
+            packages/runtime/native/snowluma-linux-x64.node
+            packages/runtime/native/snowluma-linux-x64.so
+            packages/runtime/native/snowluma-linux-arm64.node
+            packages/runtime/native/snowluma-linux-arm64.so
+          commit-message: |
+            chore(native): refresh Linux native artifacts (${{ needs.resolve.outputs.release_tag }})
+
+            Source: ${{ needs.resolve.outputs.nnphook_repository }}@${{ needs.resolve.outputs.nnphook_ref }}
+            Build:  ${{ needs.release.outputs.release_url }}
+          title: "chore(native): refresh Linux native artifacts (${{ needs.resolve.outputs.release_tag }})"
+          body: |
+            Automated update of Linux native artifacts under
+            `packages/runtime/native/`.
+
+            | File | |
+            | ---- | --- |
+            | `packages/runtime/native/snowluma-linux-x64.node`   | replaced |
+            | `packages/runtime/native/snowluma-linux-x64.so`     | replaced |
+            | `packages/runtime/native/snowluma-linux-arm64.node` | replaced |
+            | `packages/runtime/native/snowluma-linux-arm64.so`   | replaced |
+
+            - Source: `${{ needs.resolve.outputs.nnphook_repository }}@${{ needs.resolve.outputs.nnphook_ref }}`
+            - Release: ${{ needs.release.outputs.release_url }}
+            - Trigger run: ${{ needs.resolve.outputs.trigger_run_url }}
+          labels: |
+            native
+            automation
