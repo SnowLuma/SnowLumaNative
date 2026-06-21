@@ -12,7 +12,7 @@ name: Build SnowLuma Native
 #      Linux outputs come from the root CMake project (Ninja Release).
 #      Windows outputs come from two pieces:
 #        - `qq_hook_dll` target in the root CMake project → qq_hook.dll
-#        - `examples/injector_addon` cmake-js project    → injector_addon.node
+#        - `src/windows/injector_addon` cmake-js project    → injector_addon.node
 #      Both are renamed to the canonical `snowluma-win32-x64.{dll,node}`.
 #   4. Results are published as a Release on this repository (SnowLumaNative).
 #   5. Optionally, a Pull Request is opened against SnowLuma/SnowLuma replacing
@@ -268,8 +268,8 @@ jobs:
           cmake --build build-windows --config Release --target qq_hook_dll --parallel
           test -f "build-windows/Release/qq_hook.dll"
 
-      - name: Build injector_addon.node (cmake-js, examples/injector_addon)
-        working-directory: native/examples/injector_addon
+      - name: Build injector_addon.node (cmake-js, src/windows/injector_addon)
+        working-directory: native/src/windows/injector_addon
         run: |
           set -euo pipefail
           npm ci --no-fund --no-audit
@@ -284,16 +284,16 @@ jobs:
           # or build/ (single-config generator). Locate the addon binary:
           node_path=""
           for candidate in \
-              examples/injector_addon/build/Release/injector_addon.node \
-              examples/injector_addon/build/injector_addon.node; do
+              src/windows/injector_addon/build/Release/injector_addon.node \
+              src/windows/injector_addon/build/injector_addon.node; do
             if [ -f "${candidate}" ]; then
               node_path="${candidate}"
               break
             fi
           done
           if [ -z "${node_path}" ]; then
-            echo "injector_addon.node not found under examples/injector_addon/build" >&2
-            ls -laR examples/injector_addon/build || true
+            echo "injector_addon.node not found under src/windows/injector_addon/build" >&2
+            ls -laR src/windows/injector_addon/build || true
             exit 1
           fi
 
