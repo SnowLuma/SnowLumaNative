@@ -384,9 +384,6 @@ jobs:
           body: |
             Automated SnowLuma native build.
 
-            - Source: `${{ needs.resolve.outputs.nnphook_repository }}@${{ needs.resolve.outputs.nnphook_ref }}`
-            - Trigger run: ${{ needs.resolve.outputs.trigger_run_url }}
-
             Files:
             - `snowluma-linux-x64.node`
             - `snowluma-linux-x64.so`
@@ -503,8 +500,7 @@ jobs:
           commit-message: |
             chore(native): replace native artifacts (${{ needs.resolve.outputs.release_tag }})
 
-            Source: ${{ needs.resolve.outputs.nnphook_repository }}@${{ needs.resolve.outputs.nnphook_ref }}
-            Build:  ${{ needs.release.outputs.release_url }}
+            Build: ${{ needs.release.outputs.release_url }}
           title: "chore(native): replace native artifacts (${{ needs.resolve.outputs.release_tag }})"
           body: |
             Automated replacement of native artifacts under
@@ -519,9 +515,7 @@ jobs:
             | `packages/runtime/native/snowluma-win32-x64.node`   | replaced |
             | `packages/runtime/native/snowluma-win32-x64.dll`    | replaced |
 
-            - Source: `${{ needs.resolve.outputs.nnphook_repository }}@${{ needs.resolve.outputs.nnphook_ref }}`
             - Release: ${{ needs.release.outputs.release_url }}
-            - Trigger run: ${{ needs.resolve.outputs.trigger_run_url }}
           labels: |
             native
             automation
