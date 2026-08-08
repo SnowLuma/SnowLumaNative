@@ -5,7 +5,8 @@ name: Build SnowLuma Native
 # Flow:
 #   1. nnphook fires `repository_dispatch` (event_type = nnphook-native-build).
 #   2. This workflow checks out the nnphook source at the requested ref.
-#   3. Native artifacts are built in parallel on three runners:
+#   3. Native artifacts are built in parallel on three runners under the
+#      canonical SL public profile (`scripts/sl_public/` in nnphook):
 #        - ubuntu-22.04        → snowluma-linux-x64.{node,so}
 #        - ubuntu-22.04-arm    → snowluma-linux-arm64.{node,so}
 #        - windows-2022        → snowluma-win32-x64.{node,dll}
@@ -14,10 +15,13 @@ name: Build SnowLuma Native
 #        - `qq_hook_dll` target in the root CMake project → qq_hook.dll
 #        - `src/windows/injector_addon` cmake-js project    → injector_addon.node
 #      Both are renamed to the canonical `snowluma-win32-x64.{dll,node}`.
+#      All six artifacts are leak-gated and bound into native-manifest.json
+#      (nnphook commit + feature profile + SHA-256).
 #   4. Results are published as a Release on this repository (SnowLumaNative).
 #   5. Optionally, a Pull Request is opened against SnowLuma/SnowLuma replacing
 #      `packages/runtime/native/snowluma-{linux-x64,linux-arm64,win32-x64}.{node,so,dll}`
-#      (six files) with the freshly built artifacts.
+#      (six files) with the freshly built artifacts, after re-verifying the
+#      manifest hashes.
 #
 # Required secrets (configure under repository or environment scope):
 #   - SNOWLUMA_TOKEN              : PAT with `contents:read` on SnowLuma/nnphook,
@@ -86,6 +90,7 @@ jobs:
     outputs:
       nnphook_repository: ${{ steps.values.outputs.nnphook_repository }}
       nnphook_ref: ${{ steps.values.outputs.nnphook_ref }}
+      nnphook_commit: ${{ steps.pin.outputs.nnphook_commit }}
       release_tag: ${{ steps.values.outputs.release_tag }}
       open_pr: ${{ steps.values.outputs.open_pr }}
       snowluma_repository: ${{ steps.values.outputs.snowluma_repository }}
@@ -154,22 +159,43 @@ jobs:
             echo "snowluma_repository_name=${snowluma_repository_name}"
           } >> "${GITHUB_OUTPUT}"
 
+      - name: Checkout nnphook (pin full commit for manifest)
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ steps.values.outputs.nnphook_repository }}
+          ref: ${{ steps.values.outputs.nnphook_ref }}
+          path: nnphook-src
+          token: ${{ secrets.SNOWLUMA_TOKEN || github.token }}
+
+      - name: Pin nnphook commit + summarize
+        id: pin
+        working-directory: nnphook-src
+        run: |
+          set -euo pipefail
+          nnphook_commit="$(git rev-parse HEAD)"
+          echo "nnphook_commit=${nnphook_commit}" >> "${GITHUB_OUTPUT}"
+          test -f scripts/sl_public/profile.env
+          test -f scripts/sl_public/cmake_args.sh
+          test -f scripts/sl_public/check_artifact.py
+          test -f scripts/sl_public/write_manifest.py
+          test -f scripts/sl_public/verify_manifest.py
           {
             echo "## Resolved build inputs"
             echo
             echo "| Key | Value |"
             echo "| --- | --- |"
-            echo "| nnphook_repository | \`${nnphook_repository}\` |"
-            echo "| nnphook_ref | \`${nnphook_ref}\` |"
-            echo "| release_tag | \`${release_tag}\` |"
-            echo "| open_pr | \`${open_pr}\` |"
-            echo "| snowluma_repository | \`${snowluma_repository}\` |"
-            echo "| snowluma_base_branch | \`${snowluma_base_branch}\` |"
-            if [ -n "${trigger_run_url}" ]; then
-              echo "| trigger_run_url | ${trigger_run_url} |"
+            echo "| nnphook_repository | \`${{ steps.values.outputs.nnphook_repository }}\` |"
+            echo "| nnphook_ref | \`${{ steps.values.outputs.nnphook_ref }}\` |"
+            echo "| nnphook_commit | \`${nnphook_commit}\` |"
+            echo "| preset | \`sl-public-release\` |"
+            echo "| release_tag | \`${{ steps.values.outputs.release_tag }}\` |"
+            echo "| open_pr | \`${{ steps.values.outputs.open_pr }}\` |"
+            echo "| snowluma_repository | \`${{ steps.values.outputs.snowluma_repository }}\` |"
+            echo "| snowluma_base_branch | \`${{ steps.values.outputs.snowluma_base_branch }}\` |"
+            if [ -n "${{ steps.values.outputs.trigger_run_url }}" ]; then
+              echo "| trigger_run_url | ${{ steps.values.outputs.trigger_run_url }} |"
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
-
   build-native-linux:
     needs: resolve
     strategy:
@@ -200,29 +226,37 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends cmake ninja-build g++
 
-      - name: Build Linux native outputs
+      - name: Build Linux native outputs (sl-public-release)
         working-directory: native
         run: |
           set -euo pipefail
           node_include_dir="$(node -p "require('path').join(require('path').dirname(process.execPath), '..', 'include', 'node')")"
+          # shellcheck disable=SC2046
           cmake -S . -B build-linux -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
+            $(./scripts/sl_public/cmake_args.sh) \
             -DNODE_API_INCLUDE_DIR="${node_include_dir}"
           cmake --build build-linux
           test -f "build-linux/snowluma-linux-${{ matrix.arch }}.node"
           test -f "build-linux/snowluma-linux-${{ matrix.arch }}.so"
+          # Record toolchain for the provenance manifest.
+          {
+            echo "arch=${{ matrix.arch }}"
+            echo -n "cxx="
+            ${CXX:-g++} --version | head -n1
+            echo -n "cmake="
+            cmake --version | head -n1
+            echo -n "node="
+            node --version
+          } > "build-linux/toolchain-linux-${{ matrix.arch }}.txt"
 
-      - name: Verify stripped Linux native outputs
+      - name: Gate Linux native outputs (sl-public-release)
         working-directory: native
         run: |
           set -euo pipefail
-          for file in "build-linux/snowluma-linux-${{ matrix.arch }}.node" "build-linux/snowluma-linux-${{ matrix.arch }}.so"; do
-            file "${file}"
-            if readelf -S "${file}" | grep -qE '\.(debug|symtab|strtab)'; then
-              echo "Unexpected symbols or debug sections in ${file}" >&2
-              exit 1
-            fi
-          done
+          python3 scripts/sl_public/check_artifact.py \
+            "build-linux/snowluma-linux-${{ matrix.arch }}.node" \
+            "build-linux/snowluma-linux-${{ matrix.arch }}.so" \
+            --json-out "build-linux/artifact-gate-linux-${{ matrix.arch }}.json"
 
       - name: Upload native outputs
         uses: actions/upload-artifact@v7
@@ -231,6 +265,8 @@ jobs:
           path: |
             native/build-linux/snowluma-linux-${{ matrix.arch }}.node
             native/build-linux/snowluma-linux-${{ matrix.arch }}.so
+            native/build-linux/toolchain-linux-${{ matrix.arch }}.txt
+            native/build-linux/artifact-gate-linux-${{ matrix.arch }}.json
           if-no-files-found: error
           retention-days: 7
 
@@ -260,20 +296,24 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Build qq_hook.dll (root CMake target qq_hook_dll)
+      - name: Build qq_hook.dll (root CMake, sl-public-release)
         working-directory: native
         run: |
           set -euo pipefail
-          cmake -S . -B build-windows -G "Visual Studio 17 2022" -A ${{ matrix.cmake_arch }}
+          # shellcheck disable=SC2046
+          cmake -S . -B build-windows -G "Visual Studio 17 2022" -A ${{ matrix.cmake_arch }} \
+            $(./scripts/sl_public/cmake_args.sh)
           cmake --build build-windows --config Release --target qq_hook_dll --parallel
           test -f "build-windows/Release/qq_hook.dll"
 
-      - name: Build injector_addon.node (cmake-js, src/windows/injector_addon)
+      - name: Build injector_addon.node (cmake-js, public feature-OFF)
         working-directory: native/src/windows/injector_addon
         run: |
           set -euo pipefail
           npm ci --no-fund --no-audit
-          npx --no-install cmake-js rebuild
+          # Standalone cmake-js project: do NOT pass NNP_INJECT_GATE. Public
+          # contract is feature-OFF (see scripts/sl_public/profile.env).
+          npx --no-install cmake-js rebuild --CDCMAKE_BUILD_TYPE=Release
 
       - name: Stage Windows artifacts with canonical names
         working-directory: native
@@ -303,23 +343,24 @@ jobs:
           cp "${node_path}" \
              "out/win32-${{ matrix.arch }}/snowluma-win32-${{ matrix.arch }}.node"
           ls -lah "out/win32-${{ matrix.arch }}"
+          {
+            echo "arch=${{ matrix.arch }}"
+            echo -n "cl="
+            cl 2>&1 | head -n1 || true
+            echo -n "cmake="
+            cmake --version | head -n1
+            echo -n "node="
+            node --version
+          } > "out/win32-${{ matrix.arch }}/toolchain-win32-${{ matrix.arch }}.txt"
 
-      - name: Verify Windows native outputs have no PDB / debug directory
+      - name: Gate Windows native outputs (sl-public-release)
         working-directory: native
         run: |
           set -euo pipefail
-          # CMake configs (root + injector_addon) already pass /DEBUG:NONE in
-          # Release, so neither a sibling .pdb nor an IMAGE_DEBUG_DIRECTORY
-          # entry should exist. Sanity-check both.
-          for f in "out/win32-${{ matrix.arch }}/snowluma-win32-${{ matrix.arch }}.dll" \
-                   "out/win32-${{ matrix.arch }}/snowluma-win32-${{ matrix.arch }}.node"; do
-            test -f "${f}"
-            pdb="${f%.*}.pdb"
-            if [ -f "${pdb}" ]; then
-              echo "Unexpected sibling PDB found: ${pdb}" >&2
-              exit 1
-            fi
-          done
+          python3 scripts/sl_public/check_artifact.py \
+            "out/win32-${{ matrix.arch }}/snowluma-win32-${{ matrix.arch }}.dll" \
+            "out/win32-${{ matrix.arch }}/snowluma-win32-${{ matrix.arch }}.node" \
+            --json-out "out/win32-${{ matrix.arch }}/artifact-gate-win32-${{ matrix.arch }}.json"
 
       - name: Upload native outputs
         uses: actions/upload-artifact@v7
@@ -328,6 +369,8 @@ jobs:
           path: |
             native/out/win32-${{ matrix.arch }}/snowluma-win32-${{ matrix.arch }}.dll
             native/out/win32-${{ matrix.arch }}/snowluma-win32-${{ matrix.arch }}.node
+            native/out/win32-${{ matrix.arch }}/toolchain-win32-${{ matrix.arch }}.txt
+            native/out/win32-${{ matrix.arch }}/artifact-gate-win32-${{ matrix.arch }}.json
           if-no-files-found: error
           retention-days: 7
 
@@ -342,6 +385,14 @@ jobs:
     outputs:
       release_url: ${{ steps.publish.outputs.url }}
     steps:
+      - name: Checkout nnphook (scripts for manifest)
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ needs.resolve.outputs.nnphook_repository }}
+          ref: ${{ needs.resolve.outputs.nnphook_commit }}
+          path: nnphook-src
+          token: ${{ secrets.SNOWLUMA_TOKEN || github.token }}
+
       - name: Download native outputs
         uses: actions/download-artifact@v7
         with:
@@ -362,18 +413,75 @@ jobs:
             test -f "${f}" || { echo "Missing ${f}" >&2; exit 1; }
           done
 
-      - name: Compute SHA-256 manifest
-        working-directory: release-assets
+      - name: Re-gate all six artifacts + write provenance manifest
+        env:
+          NNPHOOK_REPOSITORY: ${{ needs.resolve.outputs.nnphook_repository }}
+          NNPHOOK_REF: ${{ needs.resolve.outputs.nnphook_ref }}
+          NNPHOOK_COMMIT: ${{ needs.resolve.outputs.nnphook_commit }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+          BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          sha256sum \
-            snowluma-linux-x64.node \
-            snowluma-linux-x64.so \
-            snowluma-linux-arm64.node \
-            snowluma-linux-arm64.so \
-            snowluma-win32-x64.node \
-            snowluma-win32-x64.dll \
-            | tee SHA256SUMS.txt
+          python3 nnphook-src/scripts/sl_public/check_artifact.py \
+            release-assets/snowluma-linux-x64.node \
+            release-assets/snowluma-linux-x64.so \
+            release-assets/snowluma-linux-arm64.node \
+            release-assets/snowluma-linux-arm64.so \
+            release-assets/snowluma-win32-x64.node \
+            release-assets/snowluma-win32-x64.dll \
+            --json-out release-assets/artifact-gate.json
+
+          toolchain_linux_x64=""
+          toolchain_linux_arm64=""
+          toolchain_win32_x64=""
+          if [ -f release-assets/toolchain-linux-x64.txt ]; then
+            toolchain_linux_x64="$(tr '\n' ' ' < release-assets/toolchain-linux-x64.txt)"
+          fi
+          if [ -f release-assets/toolchain-linux-arm64.txt ]; then
+            toolchain_linux_arm64="$(tr '\n' ' ' < release-assets/toolchain-linux-arm64.txt)"
+          fi
+          if [ -f release-assets/toolchain-win32-x64.txt ]; then
+            toolchain_win32_x64="$(tr '\n' ' ' < release-assets/toolchain-win32-x64.txt)"
+          fi
+
+          python3 nnphook-src/scripts/sl_public/write_manifest.py \
+            --nnphook-root nnphook-src \
+            --artifacts-dir release-assets \
+            --out release-assets/native-manifest.json \
+            --nnphook-repository "${NNPHOOK_REPOSITORY}" \
+            --nnphook-ref "${NNPHOOK_REF}" \
+            --nnphook-commit "${NNPHOOK_COMMIT}" \
+            --release-tag "${RELEASE_TAG}" \
+            --build-run-url "${BUILD_RUN_URL}" \
+            --toolchain-linux-x64 "${toolchain_linux_x64}" \
+            --toolchain-linux-arm64 "${toolchain_linux_arm64}" \
+            --toolchain-win32-x64 "${toolchain_win32_x64}" \
+            --node-version "$(node --version 2>/dev/null || true)"
+
+          python3 nnphook-src/scripts/sl_public/verify_manifest.py \
+            --manifest release-assets/native-manifest.json \
+            --artifacts-dir release-assets \
+            --expect-commit "${NNPHOOK_COMMIT}"
+
+          (
+            cd release-assets
+            sha256sum \
+              snowluma-linux-x64.node \
+              snowluma-linux-x64.so \
+              snowluma-linux-arm64.node \
+              snowluma-linux-arm64.so \
+              snowluma-win32-x64.node \
+              snowluma-win32-x64.dll \
+              native-manifest.json \
+              | tee SHA256SUMS.txt
+          )
+          {
+            echo "## native-manifest.json"
+            echo
+            echo '```json'
+            cat release-assets/native-manifest.json
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Publish GitHub Release
         id: publish
@@ -382,7 +490,9 @@ jobs:
           tag_name: ${{ needs.resolve.outputs.release_tag }}
           name: ${{ needs.resolve.outputs.release_tag }}
           body: |
-            Automated SnowLuma native build.
+            Automated SnowLuma native build (`sl-public-release`).
+
+            nnphook commit: `${{ needs.resolve.outputs.nnphook_commit }}`
 
             Files:
             - `snowluma-linux-x64.node`
@@ -391,6 +501,7 @@ jobs:
             - `snowluma-linux-arm64.so`
             - `snowluma-win32-x64.node`
             - `snowluma-win32-x64.dll`
+            - `native-manifest.json` (preset/schema/features/SHA-256)
             - `SHA256SUMS.txt`
           files: |
             release-assets/snowluma-linux-x64.node
@@ -399,6 +510,7 @@ jobs:
             release-assets/snowluma-linux-arm64.so
             release-assets/snowluma-win32-x64.node
             release-assets/snowluma-win32-x64.dll
+            release-assets/native-manifest.json
             release-assets/SHA256SUMS.txt
           fail_on_unmatched_files: true
 
@@ -450,6 +562,14 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
           echo "Resolved bot: ${bot_identity}"
 
+      - name: Checkout nnphook (scripts for manifest verify)
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ needs.resolve.outputs.nnphook_repository }}
+          ref: ${{ needs.resolve.outputs.nnphook_commit }}
+          path: nnphook-src
+          token: ${{ secrets.SNOWLUMA_TOKEN || github.token }}
+
       - name: Checkout SnowLuma
         uses: actions/checkout@v6
         with:
@@ -465,7 +585,13 @@ jobs:
           path: native-artifacts
           merge-multiple: true
 
-      - name: Replace native artifacts in SnowLuma
+      - name: Replace native artifacts in SnowLuma (manifest-bound)
+        env:
+          NNPHOOK_REPOSITORY: ${{ needs.resolve.outputs.nnphook_repository }}
+          NNPHOOK_REF: ${{ needs.resolve.outputs.nnphook_ref }}
+          NNPHOOK_COMMIT: ${{ needs.resolve.outputs.nnphook_commit }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+          BUILD_RUN_URL: ${{ needs.release.outputs.release_url }}
         run: |
           set -euo pipefail
           dest="SnowLuma/packages/runtime/native"
@@ -476,6 +602,31 @@ jobs:
           install -m 644 native-artifacts/snowluma-linux-arm64.so   "${dest}/snowluma-linux-arm64.so"
           install -m 644 native-artifacts/snowluma-win32-x64.node   "${dest}/snowluma-win32-x64.node"
           install -m 644 native-artifacts/snowluma-win32-x64.dll    "${dest}/snowluma-win32-x64.dll"
+
+          # Rebuild the provenance manifest from the staged bytes and bind it.
+          # Hashes must match what the release job published.
+          python3 nnphook-src/scripts/sl_public/write_manifest.py \
+            --nnphook-root nnphook-src \
+            --artifacts-dir "${dest}" \
+            --out "${dest}/native-manifest.json" \
+            --nnphook-repository "${NNPHOOK_REPOSITORY}" \
+            --nnphook-ref "${NNPHOOK_REF}" \
+            --nnphook-commit "${NNPHOOK_COMMIT}" \
+            --release-tag "${RELEASE_TAG}" \
+            --build-run-url "${BUILD_RUN_URL}"
+
+          python3 nnphook-src/scripts/sl_public/verify_manifest.py \
+            --manifest "${dest}/native-manifest.json" \
+            --artifacts-dir "${dest}" \
+            --expect-commit "${NNPHOOK_COMMIT}"
+
+          python3 nnphook-src/scripts/sl_public/check_artifact.py \
+            "${dest}/snowluma-linux-x64.node" \
+            "${dest}/snowluma-linux-x64.so" \
+            "${dest}/snowluma-linux-arm64.node" \
+            "${dest}/snowluma-linux-arm64.so" \
+            "${dest}/snowluma-win32-x64.node" \
+            "${dest}/snowluma-win32-x64.dll"
 
           echo "## Files staged for PR" >> "${GITHUB_STEP_SUMMARY}"
           (cd SnowLuma && git status --short packages/runtime/native) | tee -a "${GITHUB_STEP_SUMMARY}"
@@ -497,14 +648,17 @@ jobs:
             packages/runtime/native/snowluma-linux-arm64.so
             packages/runtime/native/snowluma-win32-x64.node
             packages/runtime/native/snowluma-win32-x64.dll
+            packages/runtime/native/native-manifest.json
           commit-message: |
             chore(native): replace native artifacts (${{ needs.resolve.outputs.release_tag }})
 
             Build: ${{ needs.release.outputs.release_url }}
+            nnphook: ${{ needs.resolve.outputs.nnphook_commit }}
+            preset: sl-public-release
           title: "chore(native): replace native artifacts (${{ needs.resolve.outputs.release_tag }})"
           body: |
             Automated replacement of native artifacts under
-            `packages/runtime/native/`.
+            `packages/runtime/native/`, bound by `native-manifest.json`.
 
             | File | |
             | ---- | --- |
@@ -514,8 +668,11 @@ jobs:
             | `packages/runtime/native/snowluma-linux-arm64.so`   | replaced |
             | `packages/runtime/native/snowluma-win32-x64.node`   | replaced |
             | `packages/runtime/native/snowluma-win32-x64.dll`    | replaced |
+            | `packages/runtime/native/native-manifest.json`      | replaced |
 
             - Release: ${{ needs.release.outputs.release_url }}
+            - nnphook commit: `${{ needs.resolve.outputs.nnphook_commit }}`
+            - preset: `sl-public-release`
           labels: |
             native
             automation
