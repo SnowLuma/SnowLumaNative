@@ -231,9 +231,12 @@ jobs:
         run: |
           set -euo pipefail
           node_include_dir="$(node -p "require('path').join(require('path').dirname(process.execPath), '..', 'include', 'node')")"
+          seed="$(python3 -c 'import secrets; print(f"0x{secrets.randbits(32):08x}")')"
+          # Fresh per-build seed; do not print or persist it in provenance.
           # shellcheck disable=SC2046
           cmake -S . -B build-linux -G Ninja \
             $(./scripts/sl_public/cmake_args.sh) \
+            -DNNP_OBF_SEED_OVERRIDE="${seed}" \
             -DNODE_API_INCLUDE_DIR="${node_include_dir}"
           cmake --build build-linux
           test -f "build-linux/snowluma-linux-${{ matrix.arch }}.node"
@@ -300,9 +303,12 @@ jobs:
         working-directory: native
         run: |
           set -euo pipefail
+          seed="$(python3 -c 'import secrets; print(f"0x{secrets.randbits(32):08x}")')"
+          # Fresh per-build seed; do not print or persist it in provenance.
           # shellcheck disable=SC2046
           cmake -S . -B build-windows -G "Visual Studio 17 2022" -A ${{ matrix.cmake_arch }} \
-            $(./scripts/sl_public/cmake_args.sh)
+            $(./scripts/sl_public/cmake_args.sh) \
+            -DNNP_OBF_SEED_OVERRIDE="${seed}"
           cmake --build build-windows --config Release --target qq_hook_dll --parallel
           test -f "build-windows/Release/qq_hook.dll"
 
@@ -313,7 +319,10 @@ jobs:
           npm ci --no-fund --no-audit
           # Standalone cmake-js project: do NOT pass NNP_INJECT_GATE. Public
           # contract is feature-OFF (see scripts/sl_public/profile.env).
-          npx --no-install cmake-js rebuild --CDCMAKE_BUILD_TYPE=Release
+          seed="$(python3 -c 'import secrets; print(f"0x{secrets.randbits(32):08x}")')"
+          npx --no-install cmake-js rebuild \
+            --CDCMAKE_BUILD_TYPE=Release \
+            --CDNNP_OBF_SEED_OVERRIDE="${seed}"
 
       - name: Stage Windows artifacts with canonical names
         working-directory: native
