@@ -613,11 +613,12 @@ jobs:
           install -m 644 native-artifacts/snowluma-win32-x64.dll    "${dest}/snowluma-win32-x64.dll"
 
           # Rebuild the provenance manifest from the staged bytes and bind it.
-          # Hashes must match what the release job published.
+          # Hashes must match what the release job published. Keep this file in
+          # the build area; only the six binaries enter the SnowLuma PR.
           python3 nnphook-src/scripts/sl_public/write_manifest.py \
             --nnphook-root nnphook-src \
             --artifacts-dir "${dest}" \
-            --out "${dest}/native-manifest.json" \
+            --out native-artifacts/native-manifest.json \
             --nnphook-repository "${NNPHOOK_REPOSITORY}" \
             --nnphook-ref "${NNPHOOK_REF}" \
             --nnphook-commit "${NNPHOOK_COMMIT}" \
@@ -625,7 +626,7 @@ jobs:
             --build-run-url "${BUILD_RUN_URL}"
 
           python3 nnphook-src/scripts/sl_public/verify_manifest.py \
-            --manifest "${dest}/native-manifest.json" \
+            --manifest native-artifacts/native-manifest.json \
             --artifacts-dir "${dest}" \
             --expect-commit "${NNPHOOK_COMMIT}"
 
@@ -657,7 +658,6 @@ jobs:
             packages/runtime/native/snowluma-linux-arm64.so
             packages/runtime/native/snowluma-win32-x64.node
             packages/runtime/native/snowluma-win32-x64.dll
-            packages/runtime/native/native-manifest.json
           commit-message: |
             chore(native): replace native artifacts (${{ needs.resolve.outputs.release_tag }})
 
@@ -667,7 +667,7 @@ jobs:
           title: "chore(native): replace native artifacts (${{ needs.resolve.outputs.release_tag }})"
           body: |
             Automated replacement of native artifacts under
-            `packages/runtime/native/`, bound by `native-manifest.json`.
+            `packages/runtime/native/`, with SHA-256 verification.
 
             | File | |
             | ---- | --- |
@@ -677,7 +677,6 @@ jobs:
             | `packages/runtime/native/snowluma-linux-arm64.so`   | replaced |
             | `packages/runtime/native/snowluma-win32-x64.node`   | replaced |
             | `packages/runtime/native/snowluma-win32-x64.dll`    | replaced |
-            | `packages/runtime/native/native-manifest.json`      | replaced |
 
             - Release: ${{ needs.release.outputs.release_url }}
             - nnphook commit: `${{ needs.resolve.outputs.nnphook_commit }}`
